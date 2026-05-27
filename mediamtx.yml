@@ -1,0 +1,29 @@
+# File: mediamtx.yml
+# MediaMTX Configuration for TrueCloud camera relay
+
+# Port settings
+rtspAddress: :8554
+rtspListenerAddress: :8554
+rtmpAddress: :1935
+hlsAddress: :8888
+webrtcAddress: :8889
+
+# Logging
+logLevel: info
+logDestinations: [stdout]
+
+# Stream path configurations
+paths:
+  trueview_cam:
+    # Source is the local RTSP URL. 
+    # Change the credentials (admin:PASSWORD) if necessary to match your camera configuration.
+    source: rtsp://admin:admin@192.168.1.8:554/cam/realmonitor?channel=1&subtype=0
+    
+    # Run the source stream on-demand, connecting to the camera only when a client connects to MediaMTX
+    sourceOnDemand: yes
+    
+    # Transport protocol to use when connecting to the camera
+    sourceProtocol: tcp
+    
+    # Restart the connection to the camera if it disconnects
+    sourceFingerprint: ""

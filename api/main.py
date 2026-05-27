@@ -7,9 +7,10 @@ from fastapi import FastAPI, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from datetime import datetime
 
 # Local modules
-from core.detector import CrimeDetectionDetector
+from core.detector import CrimeDetectionDetector, YOLO_AVAILABLE
 from core.intensity_scorer import score_incident
 from core.police_station_locator import find_nearest_station
 from alerts.email_alert import send_email_alert
@@ -79,6 +80,9 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
     write incident to Firestore, and trigger alerts.
     """
     logger.info(f"Starting ingestion worker thread for camera {camera_id} (Source: {source})")
+    # Optimize FFMPEG capture options for H.265/high-resolution RTSP streams
+    # TCP transport ensures packet integrity; nobuffer decreases stream latency
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|analyzeduration;100000|probesize;100000"
     cap = cv2.VideoCapture(source)
     
     if not cap.isOpened():
