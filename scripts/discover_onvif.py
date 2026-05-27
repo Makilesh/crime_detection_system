@@ -2,6 +2,10 @@
 import os
 import sys
 import argparse
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 try:
     import onvif
@@ -71,9 +75,10 @@ def discover_camera(ip, port, user, password):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ONVIF Auto-Discovery Script for Trueview/Dahua Camera")
     parser.add_argument("--ip", default="192.168.1.8", help="IP address of the camera (default: 192.168.1.8)")
-    parser.add_argument("--user", default="admin", help="ONVIF username (default: admin)")
-    parser.add_argument("--password", default="", help="ONVIF password (default: empty)")
+    parser.add_argument("--user", default=os.getenv("CAMERA_USER", "admin"), help="ONVIF username")
+    parser.add_argument("--password", default=os.getenv("CAMERA_PASS", ""), help="ONVIF password")
     parser.add_argument("--ports", default="80,8899,8080", help="Comma-separated ONVIF ports to probe (default: 80,8899,8080)")
+
     
     args = parser.parse_args()
     

@@ -1,8 +1,13 @@
 # File: scripts/test_rtsp.py
+import os
 import json
 import subprocess
 import sys
 import argparse
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 def get_candidates(ip, user, password):
     """
@@ -94,9 +99,10 @@ def probe_rtsp_url(url, timeout=5):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test candidate RTSP URLs using ffprobe")
     parser.add_argument("--ip", default="192.168.1.8", help="Camera IP address")
-    parser.add_argument("--user", default="admin", help="Camera username")
-    parser.add_argument("--password", default="", help="Camera password")
+    parser.add_argument("--user", default=os.getenv("CAMERA_USER", "admin"), help="Camera username")
+    parser.add_argument("--password", default=os.getenv("CAMERA_PASS", ""), help="Camera password")
     parser.add_argument("--timeout", type=int, default=5, help="Connection timeout in seconds")
+
     
     args = parser.parse_args()
     
