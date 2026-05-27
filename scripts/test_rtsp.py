@@ -45,7 +45,7 @@ def probe_rtsp_url(url, timeout=5):
         "-print_format", "json",
         "-show_streams",
         "-rtsp_transport", "tcp",  # Force TCP for stability
-        "-stimeout", str(timeout * 1000000),  # microseconds timeout for connection
+        "-timeout", str(timeout * 1000000),  # microseconds timeout for connection
         url
     ]
     
