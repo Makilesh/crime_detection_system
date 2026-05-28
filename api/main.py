@@ -80,9 +80,9 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
     write incident to Firestore, and trigger alerts.
     """
     logger.info(f"Starting ingestion worker thread for camera {camera_id} (Source: {source})")
-    # Optimize FFMPEG capture options for H.265/high-resolution RTSP streams
-    # TCP transport ensures packet integrity; nobuffer decreases stream latency
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|fflags;nobuffer|analyzeduration;100000|probesize;100000"
+    # Optimize FFMPEG capture options for RTSP streams
+    # TCP transport ensures packet integrity and reduces packet drop issues
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
     cap = cv2.VideoCapture(source)
     
     if not cap.isOpened():
