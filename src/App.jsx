@@ -86,10 +86,16 @@ export default function App() {
 
       // Update ticker logs
       const logs = docs.slice(0, 15).map(doc => {
-        const time = doc.detected_at?.toDate ? doc.detected_at.toDate() : new Date(doc.detected_at);
+        let timeStr = 'Just now';
+        if (doc.detected_at) {
+          const time = doc.detected_at.toDate ? doc.detected_at.toDate() : new Date(doc.detected_at);
+          if (!isNaN(time.getTime())) {
+            timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          }
+        }
         return {
           id: doc.id,
-          time: time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          time: timeStr,
           msg: `${doc.incident_type?.toUpperCase()} detected at ${doc.location}`,
           severity: doc.intensity?.toLowerCase(),
           details: doc.details || ''
@@ -242,6 +248,7 @@ export default function App() {
 
               <LiveFeed 
                 activeCamera={activeCamera}
+                activeIncidents={activeIncidents}
                 onNewIncident={(inc) => {
                   // Local callback if needed, Firestore sync takes care of list state
                 }}

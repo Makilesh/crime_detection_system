@@ -4,6 +4,7 @@ import threading
 import time
 import logging
 from fastapi import FastAPI, BackgroundTasks, Query
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -65,6 +66,7 @@ except Exception as e:
 
 # Global state for actively running camera streams
 running_streams = {}  # camera_id -> thread active state
+latest_frames = {}    # camera_id -> raw jpeg bytes
 detector = CrimeDetectionDetector()
 
 class CameraConfig(BaseModel):
@@ -100,6 +102,7 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
         (100, 80), (300, 80), (350, 250), (80, 250)
     ])
 
+    current_detections = []
     last_processed_time = time.time()
 
     while running_streams.get(camera_id, False):
@@ -115,22 +118,22 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
             cap = cv2.VideoCapture(source_val)
             continue
             
+        # Resize for consistent model input dimensions
+        frame_resized = cv2.resize(frame, (640, 360))
+
         if elapsed >= frame_interval:
             last_processed_time = current_time
             
-            # Resize for consistent model input dimensions
-            frame_resized = cv2.resize(frame, (640, 360))
-            
             # Run YOLO detector
-            detections = detector.process_frame(frame_resized, camera_id)
+            current_detections = detector.process_frame(frame_resized, camera_id)
             
-            if detections:
+            if current_detections:
                 # Score threat intensity
-                detection_dicts = [d.to_dict() for d in detections]
+                detection_dicts = [d.to_dict() for d in current_detections]
                 intensity, reason = score_incident(detection_dicts)
                 
                 # Check confidence threshold gate
-                max_conf = max(d.confidence for d in detections)
+                max_conf = max(d.confidence for d in current_detections)
                 
                 # Find nearest police station
                 nearest_station = find_nearest_station(lat, lng)
@@ -141,7 +144,7 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
                     "location": location,
                     "latitude": lat,
                     "longitude": lng,
-                    "incident_type": detections[0].type,
+                    "incident_type": current_detections[0].type,
                     "detected_at": firestore.SERVER_TIMESTAMP if db else datetime.now().isoformat(),
                     "intensity": intensity,
                     "confidence": max_conf,
@@ -154,7 +157,7 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
                 if db:
                     try:
                         db.collection("incidents").add(incident_payload)
-                        logger.info(f"Incident {detections[0].type} written to Cloud Firestore!")
+                        logger.info(f"Incident {current_detections[0].type} written to Cloud Firestore!")
                     except Exception as e:
                         logger.error(f"Failed to write to Firestore: {str(e)}")
                 else:
@@ -164,7 +167,7 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
                 # Low/Medium -> Send email
                 if intensity in ["low", "medium"]:
                     send_email_alert(
-                        incident_type=detections[0].type,
+                        incident_type=current_detections[0].type,
                         location=location,
                         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         intensity=intensity,
@@ -174,7 +177,7 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
                 elif intensity == "high":
                     # Send email
                     send_email_alert(
-                        incident_type=detections[0].type,
+                        incident_type=current_detections[0].type,
                         location=location,
                         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         intensity=intensity,
@@ -184,13 +187,25 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
                     station_phone = nearest_station["phone"] if nearest_station else "+15550199"
                     make_voice_call(
                         police_phone=station_phone,
-                        incident_type=detections[0].type,
+                        incident_type=current_detections[0].type,
                         location=location,
                         timestamp=datetime.now().strftime("%I:%M %p")
                     )
 
+        # Annotate and save frame for live streaming
+        annotated_frame = frame_resized.copy()
+        for det in current_detections:
+            x1, y1, x2, y2 = det.bbox
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(annotated_frame, f"{det.type} ({det.confidence:.2f})", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        
+        _, jpeg_bytes = cv2.imencode('.jpg', annotated_frame)
+        latest_frames[camera_id] = jpeg_bytes.tobytes()
+
         # Sleep briefly to reduce CPU utilization
         time.sleep(0.01)
+
 
     cap.release()
     logger.info(f"Stream thread {camera_id} stopped.")
@@ -231,6 +246,22 @@ def get_streams_status():
     Get active stream processing status.
     """
     return {"active_streams": {cid: active for cid, active in running_streams.items()}}
+
+def gen_frames(camera_id: str):
+    while True:
+        frame_bytes = latest_frames.get(camera_id)
+        if frame_bytes:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        time.sleep(0.08)  # Limit output frame rate (~12 FPS) to optimize network bandwidth
+
+@app.get("/streams/video/{camera_id}")
+def get_video_stream(camera_id: str):
+    """
+    Get the live annotated MJPEG stream from the processed video capture.
+    """
+    return StreamingResponse(gen_frames(camera_id), media_type="multipart/x-mixed-replace; boundary=frame")
+
 
 @app.get("/health")
 def health_check():

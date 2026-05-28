@@ -3,7 +3,7 @@ import { Camera, Settings, RefreshCw, StopCircle, Play, ShieldAlert, Sparkles } 
 import { collection, addDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 
-export default function LiveFeed({ activeCamera, onNewIncident }) {
+export default function LiveFeed({ activeCamera, activeIncidents, onNewIncident }) {
   const [isDrawing, setIsDrawing] = useState(false);
   const [polygonPoints, setPolygonPoints] = useState([
     { x: 100, y: 80 },
@@ -12,12 +12,20 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
     { x: 80, y: 250 }
   ]);
   const [activeThreats, setActiveThreats] = useState([]);
-  const [isCameraActive, setIsCameraActive] = useState(true);
+  const [isBackendActive, setIsBackendActive] = useState(false);
+  const [streamKey, setStreamKey] = useState(0);
   const [simSpeed, setSimSpeed] = useState(1);
   
   const canvasRef = useRef(null);
-  const videoRef = useRef(null);
   const requestRef = useRef(null);
+
+  const getRtspUrl = (camera) => {
+    if (!camera) return '';
+    if (camera.rtsp_url) return camera.rtsp_url;
+    if (camera.id === 'cam_webcam') return '0';
+    if (camera.id === 'cam_gate') return 'rtsp://admin:admin@123@192.168.1.8:554/cam/realmonitor?channel=1&subtype=1';
+    return '';
+  };
   
   // Simulated entities (people, objects) moving in the frame
   const entitiesRef = useRef([
@@ -101,35 +109,79 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
     }
   };
 
-  // Webcam activation
+  // Poll backend stream status periodically
   useEffect(() => {
-    if (activeCamera?.id === 'cam_webcam') {
-      if (isCameraActive) {
-        navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } })
-          .then(stream => {
-            if (videoRef.current) {
-              videoRef.current.srcObject = stream;
-              videoRef.current.play().catch(e => console.log('Video play error:', e));
-            }
-          })
-          .catch(err => {
-            console.warn('Webcam not available, fallback to simulation:', err);
-          });
-      } else {
-        stopWebcam();
+    if (!activeCamera) return;
+    let active = true;
+
+    const checkStatus = async () => {
+      try {
+        const res = await fetch('http://localhost:8000/streams/status');
+        if (!res.ok) throw new Error('Backend offline');
+        const data = await res.json();
+        if (active) {
+          const activeStreams = data.active_streams || {};
+          setIsBackendActive(!!activeStreams[activeCamera.id]);
+        }
+      } catch (err) {
+        if (active) {
+          setIsBackendActive(false);
+        }
       }
-    } else {
-      stopWebcam();
-    }
+    };
 
-    return () => stopWebcam();
-  }, [activeCamera, isCameraActive]);
+    checkStatus();
+    const interval = setInterval(checkStatus, 3000);
 
-  const stopWebcam = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach(track => track.stop());
-      videoRef.current.srcObject = null;
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [activeCamera]);
+
+  const toggleBackendStream = async () => {
+    if (!activeCamera) return;
+    try {
+      if (isBackendActive) {
+        // Stop stream
+        const res = await fetch(`http://localhost:8000/streams/stop/${activeCamera.id}`, {
+          method: 'POST'
+        });
+        if (res.ok) {
+          setIsBackendActive(false);
+        } else {
+          alert('Failed to stop backend stream process.');
+        }
+      } else {
+        // Start stream
+        const rtspUrl = getRtspUrl(activeCamera);
+        if (!rtspUrl) {
+          alert(`No streaming source configured for camera "${activeCamera.name}"`);
+          return;
+        }
+        const res = await fetch('http://localhost:8000/streams/start', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            id: activeCamera.id,
+            rtsp_url: rtspUrl,
+            location: activeCamera.location || 'Unknown',
+            latitude: activeCamera.latitude || 0,
+            longitude: activeCamera.longitude || 0
+          })
+        });
+        if (res.ok) {
+          setIsBackendActive(true);
+          setStreamKey(prev => prev + 1); // Refresh image feed
+        } else {
+          alert('Failed to start backend stream process.');
+        }
+      }
+    } catch (err) {
+      console.error('Error toggling backend stream:', err);
+      alert('Could not connect to FastAPI backend server on port 8000.');
     }
   };
 
@@ -149,10 +201,7 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
       frameCount++;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-      if (activeCamera?.id === 'cam_webcam' && videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
-        // Draw webcam stream
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      } else {
+      if (!isBackendActive) {
         // Draw simulated background
         ctx.fillStyle = '#06060c';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -190,7 +239,7 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
         ctx.fillText('BAY 02', 510, 55);
       }
 
-      // Draw custom polygon zone
+      // Draw custom polygon zone (restricted area)
       if (polygonPoints.length > 0) {
         ctx.beginPath();
         ctx.moveTo(polygonPoints[0].x, polygonPoints[0].y);
@@ -218,154 +267,160 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
         }
       }
 
-      // Update and Draw Simulated Targets/Entities
-      const entities = entitiesRef.current;
-      const currentThreats = [];
+      // Update and Draw Simulated Targets/Entities (Only in simulation mode)
+      if (!isBackendActive) {
+        const entities = entitiesRef.current;
+        const currentThreats = [];
 
-      entities.forEach((entity) => {
-        // Move entity
-        entity.x += entity.vx * simSpeed;
-        entity.y += entity.vy * simSpeed;
+        entities.forEach((entity) => {
+          // Move entity
+          entity.x += entity.vx * simSpeed;
+          entity.y += entity.vy * simSpeed;
 
-        // Wall collisions (bounce back)
-        if (entity.x < 10 || entity.x > canvas.width - 10) {
-          entity.vx *= -1;
-          entity.x = Math.max(10, Math.min(canvas.width - 10, entity.x));
-        }
-        if (entity.y < 10 || entity.y > canvas.height - 10) {
-          entity.vy *= -1;
-          entity.y = Math.max(10, Math.min(canvas.height - 10, entity.y));
-        }
-
-        // Check if inside polygon
-        const inZone = polygonPoints.length >= 3 && isPointInPolygon(entity.x, entity.y, polygonPoints);
-
-        // Bounding box colors
-        let boxColor = 'rgba(0, 240, 255, 0.7)'; // Cyan default
-        let boxGlow = 'rgba(0, 240, 255, 0.2)';
-
-        if (inZone) {
-          boxColor = 'var(--accent-red)';
-          boxGlow = 'rgba(255, 0, 85, 0.3)';
-          entity.loiterTime += 1;
-
-          // Trigger Intrusion alert (throttle to once per entrance)
-          if (!entity.threatTriggered.intrusion) {
-            entity.threatTriggered.intrusion = true;
-            triggerIncident('intrusion', 'medium', `${entity.name} entered restricted zone`);
+          // Wall collisions (bounce back)
+          if (entity.x < 10 || entity.x > canvas.width - 10) {
+            entity.vx *= -1;
+            entity.x = Math.max(10, Math.min(canvas.width - 10, entity.x));
+          }
+          if (entity.y < 10 || entity.y > canvas.height - 10) {
+            entity.vy *= -1;
+            entity.y = Math.max(10, Math.min(canvas.height - 10, entity.y));
           }
 
-          // Trigger Loitering alert after 180 frames (approx 6 seconds at 30fps)
-          if (entity.loiterTime > 180 && !entity.threatTriggered.loitering) {
-            entity.threatTriggered.loitering = true;
-            triggerIncident('loitering', 'low', `${entity.name} dwelling in restricted zone for >6s`);
-          }
-        } else {
-          entity.loiterTime = Math.max(0, entity.loiterTime - 2);
-          if (entity.loiterTime === 0) {
-            // Reset triggers when they exit
-            entity.threatTriggered.intrusion = false;
-            entity.threatTriggered.loitering = false;
-          }
-        }
+          // Check if inside polygon
+          const inZone = polygonPoints.length >= 3 && isPointInPolygon(entity.x, entity.y, polygonPoints);
 
-        // Periodic Random Event: Violence simulation (Subject A and B approach each other)
-        if (entity.id === 1) {
-          const other = entities.find(e => e.id === 2);
-          if (other) {
-            const dist = Math.sqrt((entity.x - other.x) ** 2 + (entity.y - other.y) ** 2);
-            // If they are very close, simulate conflict (5% chance if close)
-            if (dist < 40 && frameCount % 300 === 0 && !entity.threatTriggered.violence) {
-              entity.threatTriggered.violence = true;
-              other.threatTriggered.violence = true;
-              triggerIncident('violence', 'high', `Physical conflict detected between ${entity.name} and ${other.name}`);
+          // Bounding box colors
+          let boxColor = 'rgba(0, 240, 255, 0.7)'; // Cyan default
+          let boxGlow = 'rgba(0, 240, 255, 0.2)';
+
+          if (inZone) {
+            boxColor = 'var(--accent-red)';
+            boxGlow = 'rgba(255, 0, 85, 0.3)';
+            entity.loiterTime += 1;
+
+            // Trigger Intrusion alert (throttle to once per entrance)
+            if (!entity.threatTriggered.intrusion) {
+              entity.threatTriggered.intrusion = true;
+              triggerIncident('intrusion', 'medium', `${entity.name} entered restricted zone`);
             }
 
-            // Conflict duration
-            if (entity.threatTriggered.violence) {
-              boxColor = 'var(--accent-red)';
-              boxGlow = 'rgba(255, 0, 85, 0.4)';
-              
-              // Jitter/Aggressive movement
-              entity.vx = (Math.random() - 0.5) * 5;
-              entity.vy = (Math.random() - 0.5) * 5;
-              
-              // Draw visual violence trigger indicator
-              ctx.strokeStyle = 'var(--accent-red)';
-              ctx.lineWidth = 1;
-              ctx.beginPath();
-              ctx.arc((entity.x + other.x) / 2, (entity.y + other.y) / 2, 35, 0, Math.PI * 2);
-              ctx.stroke();
-              ctx.fillStyle = 'rgba(255, 0, 85, 0.8)';
-              ctx.font = '8px Orbitron';
-              ctx.fillText('POSE THREAT: AGGRESSION', (entity.x + other.x) / 2 - 60, (entity.y + other.y) / 2 - 40);
+            // Trigger Loitering alert after 180 frames (approx 6 seconds at 30fps)
+            if (entity.loiterTime > 180 && !entity.threatTriggered.loitering) {
+              entity.threatTriggered.loitering = true;
+              triggerIncident('loitering', 'low', `${entity.name} dwelling in restricted zone for >6s`);
+            }
+          } else {
+            entity.loiterTime = Math.max(0, entity.loiterTime - 2);
+            if (entity.loiterTime === 0) {
+              // Reset triggers when they exit
+              entity.threatTriggered.intrusion = false;
+              entity.threatTriggered.loitering = false;
+            }
+          }
 
-              // Clear conflict after 120 frames
-              if (frameCount % 120 === 0) {
-                entity.threatTriggered.violence = false;
-                other.threatTriggered.violence = false;
-                entity.vx = (Math.random() - 0.5) * 3;
-                entity.vy = (Math.random() - 0.5) * 3;
+          // Periodic Random Event: Violence simulation (Subject A and B approach each other)
+          if (entity.id === 1) {
+            const other = entities.find(e => e.id === 2);
+            if (other) {
+              const dist = Math.sqrt((entity.x - other.x) ** 2 + (entity.y - other.y) ** 2);
+              // If they are very close, simulate conflict (5% chance if close)
+              if (dist < 40 && frameCount % 300 === 0 && !entity.threatTriggered.violence) {
+                entity.threatTriggered.violence = true;
+                other.threatTriggered.violence = true;
+                triggerIncident('violence', 'high', `Physical conflict detected between ${entity.name} and ${other.name}`);
+              }
+
+              // Conflict duration
+              if (entity.threatTriggered.violence) {
+                boxColor = 'var(--accent-red)';
+                boxGlow = 'rgba(255, 0, 85, 0.4)';
+                
+                // Jitter/Aggressive movement
+                entity.vx = (Math.random() - 0.5) * 5;
+                entity.vy = (Math.random() - 0.5) * 5;
+                
+                // Draw visual violence trigger indicator
+                ctx.strokeStyle = 'var(--accent-red)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc((entity.x + other.x) / 2, (entity.y + other.y) / 2, 35, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.fillStyle = 'rgba(255, 0, 85, 0.8)';
+                ctx.font = '8px Orbitron';
+                ctx.fillText('POSE THREAT: AGGRESSION', (entity.x + other.x) / 2 - 60, (entity.y + other.y) / 2 - 40);
+
+                // Clear conflict after 120 frames
+                if (frameCount % 120 === 0) {
+                  entity.threatTriggered.violence = false;
+                  other.threatTriggered.violence = false;
+                  entity.vx = (Math.random() - 0.5) * 3;
+                  entity.vy = (Math.random() - 0.5) * 3;
+                }
               }
             }
           }
-        }
 
-        // Periodic Random Event: Wanted Face Detection (Subject C wanted match)
-        if (entity.id === 3 && frameCount % 600 === 100 && !entity.threatTriggered.face) {
-          entity.threatTriggered.face = true;
-          triggerIncident('face', 'high', `Wanted person MATCH: John Doe ID #4092`);
-          
-          // Clear notification
-          setTimeout(() => {
-            entity.threatTriggered.face = false;
-          }, 4000);
-        }
+          // Periodic Random Event: Wanted Face Detection (Subject C wanted match)
+          if (entity.id === 3 && frameCount % 600 === 100 && !entity.threatTriggered.face) {
+            entity.threatTriggered.face = true;
+            triggerIncident('face', 'high', `Wanted person MATCH: John Doe ID #4092`);
+            
+            // Clear notification
+            setTimeout(() => {
+              entity.threatTriggered.face = false;
+            }, 4000);
+          }
 
-        if (entity.threatTriggered.face) {
-          boxColor = 'var(--accent-red)';
-          boxGlow = 'rgba(255, 0, 85, 0.3)';
-          ctx.fillStyle = 'var(--accent-red)';
-          ctx.font = '7px Orbitron';
-          ctx.fillText('MATCH: WANTED PERSON', entity.x - 40, entity.y - entity.size - 22);
-        }
+          if (entity.threatTriggered.face) {
+            boxColor = 'var(--accent-red)';
+            boxGlow = 'rgba(255, 0, 85, 0.3)';
+            ctx.fillStyle = 'var(--accent-red)';
+            ctx.font = '7px Orbitron';
+            ctx.fillText('MATCH: WANTED PERSON', entity.x - 40, entity.y - entity.size - 22);
+          }
 
-        // Draw Target bounding box
-        ctx.shadowColor = boxGlow;
-        ctx.shadowBlur = 10;
-        ctx.strokeStyle = boxColor;
-        ctx.lineWidth = 1.5;
-        const boxWidth = entity.size * 2.5;
-        const boxHeight = entity.size * 4.5;
-        ctx.strokeRect(entity.x - boxWidth / 2, entity.y - boxHeight / 2, boxWidth, boxHeight);
-        ctx.shadowBlur = 0; // Reset shadow
+          // Draw Target bounding box
+          ctx.shadowColor = boxGlow;
+          ctx.shadowBlur = 10;
+          ctx.strokeStyle = boxColor;
+          ctx.lineWidth = 1.5;
+          const boxWidth = entity.size * 2.5;
+          const boxHeight = entity.size * 4.5;
+          ctx.strokeRect(entity.x - boxWidth / 2, entity.y - boxHeight / 2, boxWidth, boxHeight);
+          ctx.shadowBlur = 0; // Reset shadow
 
-        // Corner ticks for high-tech HUD look
-        ctx.beginPath();
-        // Top left
-        ctx.moveTo(entity.x - boxWidth / 2, entity.y - boxHeight / 2 + 5);
-        ctx.lineTo(entity.x - boxWidth / 2, entity.y - boxHeight / 2);
-        ctx.lineTo(entity.x - boxWidth / 2 + 5, entity.y - boxHeight / 2);
-        // Top right
-        ctx.moveTo(entity.x + boxWidth / 2 - 5, entity.y - boxHeight / 2);
-        ctx.lineTo(entity.x + boxWidth / 2, entity.y - boxHeight / 2);
-        ctx.lineTo(entity.x + boxWidth / 2, entity.y - boxHeight / 2 + 5);
-        ctx.strokeStyle = '#ffffff';
-        ctx.stroke();
+          // Corner ticks for high-tech HUD look
+          ctx.beginPath();
+          // Top left
+          ctx.moveTo(entity.x - boxWidth / 2, entity.y - boxHeight / 2 + 5);
+          ctx.lineTo(entity.x - boxWidth / 2, entity.y - boxHeight / 2);
+          ctx.lineTo(entity.x - boxWidth / 2 + 5, entity.y - boxHeight / 2);
+          // Top right
+          ctx.moveTo(entity.x + boxWidth / 2 - 5, entity.y - boxHeight / 2);
+          ctx.lineTo(entity.x + boxWidth / 2, entity.y - boxHeight / 2);
+          ctx.lineTo(entity.x + boxWidth / 2, entity.y - boxHeight / 2 + 5);
+          ctx.strokeStyle = '#ffffff';
+          ctx.stroke();
 
-        // Label Target Info
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '7px Inter';
-        ctx.fillText(`${entity.name} [${inZone ? 'RESTRICTED' : 'SECURE'}]`, entity.x - boxWidth / 2, entity.y - boxHeight / 2 - 10);
-        ctx.fillStyle = boxColor;
-        ctx.fillText(`CONF: ${(80 + Math.random() * 19).toFixed(0)}%`, entity.x - boxWidth / 2, entity.y - boxHeight / 2 - 3);
+          // Label Target Info
+          ctx.fillStyle = '#ffffff';
+          ctx.font = '7px Inter';
+          ctx.fillText(`${entity.name} [${inZone ? 'RESTRICTED' : 'SECURE'}]`, entity.x - boxWidth / 2, entity.y - boxHeight / 2 - 10);
+          ctx.fillStyle = boxColor;
+          ctx.fillText(`CONF: ${(80 + Math.random() * 19).toFixed(0)}%`, entity.x - boxWidth / 2, entity.y - boxHeight / 2 - 3);
 
-        if (inZone || entity.threatTriggered.violence || entity.threatTriggered.face) {
-          currentThreats.push({ name: entity.name, threat: inZone ? 'Intrusion' : (entity.threatTriggered.violence ? 'Violence' : 'Wanted Match') });
-        }
-      });
+          if (inZone || entity.threatTriggered.violence || entity.threatTriggered.face) {
+            currentThreats.push({ name: entity.name, threat: inZone ? 'Intrusion' : (entity.threatTriggered.violence ? 'Violence' : 'Wanted Match') });
+          }
+        });
 
-      setActiveThreats(currentThreats);
+        setActiveThreats(currentThreats);
+      } else {
+        // Clear simulated threats when backend is active
+        setActiveThreats([]);
+      }
+
       requestRef.current = requestAnimationFrame(render);
     };
 
@@ -376,7 +431,12 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
         cancelAnimationFrame(requestRef.current);
       }
     };
-  }, [polygonPoints, isDrawing, simSpeed, activeCamera]);
+  }, [polygonPoints, isDrawing, simSpeed, activeCamera, isBackendActive]);
+
+  // Filter active incidents for this camera
+  const backendThreats = activeIncidents
+    ? activeIncidents.filter(i => i.camera_id === activeCamera?.id && !i.reviewed)
+    : [];
 
   return (
     <div className="feed-container">
@@ -389,17 +449,19 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
         </div>
 
         <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-          {activeCamera?.id === 'cam_webcam' && (
-            <button 
-              className="control-btn"
-              onClick={() => setIsCameraActive(!isCameraActive)}
-            >
-              {isCameraActive ? <StopCircle size={12} /> : <Play size={12} />}
-              <span>{isCameraActive ? 'Stop WebCam' : 'Start WebCam'}</span>
-            </button>
-          )}
+          <button 
+            className="control-btn"
+            onClick={toggleBackendStream}
+            style={{ 
+              borderColor: isBackendActive ? 'var(--accent-red)' : 'var(--accent-cyan)',
+              color: isBackendActive ? 'var(--accent-red)' : 'var(--accent-cyan)'
+            }}
+          >
+            {isBackendActive ? <StopCircle size={12} /> : <Play size={12} />}
+            <span>{isBackendActive ? 'Stop Stream Feed' : 'Start Stream Feed'}</span>
+          </button>
 
-          {activeCamera?.id !== 'cam_webcam' && (
+          {!isBackendActive && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginRight: '0.5rem' }}>
               <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>SIM SPEED:</span>
               <select 
@@ -427,29 +489,53 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
         </div>
       </div>
 
-      <div className="video-screen-wrapper">
-        <video 
-          ref={videoRef} 
-          style={{ display: 'none' }} 
-          playsInline 
-          muted 
-        />
+      <div className="video-screen-wrapper" style={{ position: 'relative' }}>
+        {isBackendActive && (
+          <img 
+            src={`http://localhost:8000/streams/video/${activeCamera?.id}?key=${streamKey}`}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              objectFit: 'cover',
+              zIndex: 1
+            }}
+            alt="Live feed stream"
+            onError={() => {
+              console.warn('Stream image failed to load, falling back...');
+              setIsBackendActive(false);
+            }}
+          />
+        )}
         <canvas 
           ref={canvasRef} 
           className="video-canvas"
           onClick={handleCanvasClick}
-          style={{ cursor: isDrawing ? 'crosshair' : 'default' }}
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '100%',
+            zIndex: 2,
+            cursor: isDrawing ? 'crosshair' : 'default',
+            background: 'transparent'
+          }}
         />
 
         {/* Video overlay HUD */}
-        <div className="feed-hud">
+        <div className="feed-hud" style={{ zIndex: 3 }}>
           <div className="hud-left">
             <div className="hud-rec-indicator">
-              <div className="hud-rec-dot" />
-              <span>LIVE FEED</span>
+              <div className="hud-rec-dot" style={{ backgroundColor: isBackendActive ? 'var(--accent-red)' : 'var(--text-secondary)' }} />
+              <span style={{ color: isBackendActive ? 'var(--accent-red)' : 'var(--text-secondary)' }}>
+                {isBackendActive ? 'LIVE STREAM' : 'SIMULATION'}
+              </span>
             </div>
             <div>RES: 1080P</div>
-            <div>FPS: {activeCamera?.id === 'cam_webcam' ? '30.0' : '29.97'}</div>
+            <div>FPS: {isBackendActive ? '12.0' : '29.97'}</div>
           </div>
           <div className="hud-right">
             <div>CAM_ID: {activeCamera?.id?.toUpperCase() || 'SIM_001'}</div>
@@ -471,7 +557,8 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
               borderRadius: '6px',
               fontSize: '0.7rem',
               color: 'var(--accent-cyan)',
-              pointerEvents: 'none'
+              pointerEvents: 'none',
+              zIndex: 3
             }}
           >
             Click up to 6 points on feed to draw intrusion zone.
@@ -479,7 +566,7 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
         )}
 
         {/* Active alert overlays */}
-        {activeThreats.length > 0 && (
+        {((isBackendActive && backendThreats.length > 0) || (!isBackendActive && activeThreats.length > 0)) && (
           <div 
             style={{
               position: 'absolute',
@@ -496,11 +583,17 @@ export default function LiveFeed({ activeCamera, onNewIncident }) {
               fontFamily: 'var(--font-display)',
               boxShadow: 'var(--glow-red)',
               pointerEvents: 'none',
-              animation: 'pulse-glow 1s infinite alternate'
+              animation: 'pulse-glow 1s infinite alternate',
+              zIndex: 3
             }}
           >
             <ShieldAlert size={14} />
-            <span>ALERT: {activeThreats.map(t => `${t.threat} (${t.name})`).join(', ')}</span>
+            <span>
+              ALERT: {isBackendActive 
+                ? backendThreats.map(t => `${t.incident_type.toUpperCase()} (${t.details})`).join(', ')
+                : activeThreats.map(t => `${t.threat} (${t.name})`).join(', ')
+              }
+            </span>
           </div>
         )}
       </div>
