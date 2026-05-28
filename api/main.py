@@ -83,7 +83,9 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
     # Optimize FFMPEG capture options for RTSP streams
     # TCP transport ensures packet integrity and reduces packet drop issues
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-    cap = cv2.VideoCapture(source)
+    # If the source is a camera index (e.g. "0" for webcam), convert it to integer
+    source_val = int(source) if source.isdigit() else source
+    cap = cv2.VideoCapture(source_val)
     
     if not cap.isOpened():
         logger.error(f"Cannot open video/RTSP source: {source}")
@@ -110,7 +112,7 @@ def process_camera_stream_loop(camera_id: str, source: str, location: str, lat: 
             logger.warning(f"Stream disconnect or end-of-file on {camera_id}. Reconnecting...")
             cap.release()
             time.sleep(2)
-            cap = cv2.VideoCapture(source)
+            cap = cv2.VideoCapture(source_val)
             continue
             
         if elapsed >= frame_interval:
