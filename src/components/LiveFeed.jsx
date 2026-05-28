@@ -433,9 +433,11 @@ export default function LiveFeed({ activeCamera, activeIncidents, onNewIncident 
     };
   }, [polygonPoints, isDrawing, simSpeed, activeCamera, isBackendActive]);
 
-  // Filter active incidents for this camera
+  // Filter active incidents for this camera (limit to top 3 most recent to prevent UI clutter)
   const backendThreats = activeIncidents
-    ? activeIncidents.filter(i => i.camera_id === activeCamera?.id && !i.reviewed)
+    ? activeIncidents
+        .filter(i => i.camera_id === activeCamera?.id && !i.reviewed)
+        .slice(0, 3)
     : [];
 
   return (
@@ -574,26 +576,38 @@ export default function LiveFeed({ activeCamera, activeIncidents, onNewIncident 
               left: '1rem',
               background: 'rgba(255, 0, 85, 0.85)',
               color: '#ffffff',
-              padding: '0.5rem 0.8rem',
-              borderRadius: '6px',
-              fontSize: '0.75rem',
+              padding: '0.6rem 0.9rem',
+              borderRadius: '8px',
               display: 'flex',
-              alignItems: 'center',
-              gap: '0.5rem',
+              flexDirection: 'column',
+              alignItems: 'flex-start',
+              gap: '0.4rem',
               fontFamily: 'var(--font-display)',
               boxShadow: 'var(--glow-red)',
               pointerEvents: 'none',
-              animation: 'pulse-glow 1s infinite alternate',
-              zIndex: 3
+              animation: 'pulse-glow 2s infinite alternate',
+              zIndex: 3,
+              maxWidth: '350px',
+              border: '1px solid rgba(255, 255, 255, 0.2)'
             }}
           >
-            <ShieldAlert size={14} />
-            <span>
-              ALERT: {isBackendActive 
-                ? backendThreats.map(t => `${t.incident_type.toUpperCase()} (${t.details})`).join(', ')
-                : activeThreats.map(t => `${t.threat} (${t.name})`).join(', ')
-              }
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 'bold', borderBottom: '1px solid rgba(255,255,255,0.2)', width: '100%', paddingBottom: '3px', fontSize: '0.75rem' }}>
+              <ShieldAlert size={14} />
+              <span>ACTIVE THREATS</span>
+            </div>
+            {isBackendActive ? (
+              backendThreats.map(t => (
+                <div key={t.id} style={{ fontSize: '0.7rem', lineHeight: '1.2' }}>
+                  ⚠️ <span style={{ textTransform: 'uppercase', fontWeight: 700 }}>{t.incident_type}</span>: {t.details}
+                </div>
+              ))
+            ) : (
+              activeThreats.map((t, idx) => (
+                <div key={idx} style={{ fontSize: '0.7rem', lineHeight: '1.2' }}>
+                  ⚠️ <span style={{ textTransform: 'uppercase', fontWeight: 700 }}>{t.threat}</span>: {t.name}
+                </div>
+              ))
+            )}
           </div>
         )}
       </div>
